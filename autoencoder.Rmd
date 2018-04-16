@@ -1,0 +1,225 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+setwd("C:/Users/Architect_shwet/Desktop/New folder/credit card fraud detection")
+library(dplyr)
+library(ggplot2)
+library(readr)#faster data reading
+library(ggridges)
+library(highcharter)
+library(purrr)
+library(keras)
+library(tidyr)
+library(caret)
+```
+
+```{r}
+fraud <- read.csv('creditcard.csv')
+glimpse(fraud)
+head(fraud,5)
+dim(fraud)
+sapply(fraud, class)
+table(fraud$Class)
+```
+
+```{r}
+#modifying time variable in hours
+time <- fraud %>% select(Time)
+head(time,4)
+```
+
+```{r}
+time <- time %>% mutate( Time = (Time/(60*60)))
+```
+
+```{r}
+hchart(time$Time, color = "purple", name = "Time in hours") %>%
+  hc_title( text = "Histogram of Time taken for each transaction in hours", align = "center") %>%
+  hc_exporting(enabled = T) %>%
+  hc_add_theme(hc_theme_elementary())
+```
+
+```{r}
+#histogram of amount till 90 percentile
+ggplot(aes(x=Amount),data = fraud) +
+  geom_histogram(color="black",fill="green",alpha=0.8,bins=30) +
+  scale_x_continuous(breaks=seq(0,1000,100),limits=c(0,quantile(fraud$Amount,c(0.99)))) +
+  scale_y_continuous(limits=c(0,30000)) +
+  ggtitle("Histogram of Transaction Amount") +
+  xlab("Amount till 90 percentile") +
+  ylab("Frequency")
+```
+#For an autoencoder to work well we have a strong initial assumption: 
+#that the distribution of variables for normal transactions is different from the distribution for 
+#fraudulent ones. Let's make some plots to verify this. 
+#Variables were transformed to a [0,1] interval for plotting.
+```{r}
+attach(fraud)
+fraud %>%
+  gather(variable, value, -Class) %>%
+  ggplot(aes(y = as.factor(variable), 
+             fill = as.factor(Class), 
+             x = percent_rank(value))) +
+  geom_density_ridges() +
+  labs(x="Normalized variable",y="Variable",fill="Distribution of Fraud and Non-fraud")
+```
+#We can see that distributions of variables for fraudulent transactions are very different then from normal ones, except for the Time variable, 
+#which seems to have the exact same distribution.
+```{r}
+#let's check the distribution of Amount and The normal and fradulent transactions
+
+ggplot(fraud,aes(y=Amount,x=Class)) + 
+  geom_boxplot(aes(group=Class)) +
+  scale_y_continuous(limits=c(0,quantile(Amount,c(0.99))))
+```
+
+```{r}
+ggplot(fraud,aes(x=Time,y=Amount,color=as.factor(Class))) + 
+  geom_point() +
+  #adding custom colors
+  labs(x="Time",y="amount",title="Scatter plot of Time vs Amount colored by type of transaction",
+       color="Fraud")
+```
+
+```{r}
+#Spliting training set into two parts based on outcome: 75% and 25%
+index <- createDataPartition(fraud$Class, p=0.75, list=FALSE)
+trainSet <- fraud[ index,]
+testSet <- fraud[-index,]
+```
+```{r}
+dim(trainSet)
+```
+
+```{r}
+#Normalizing the inputs
+
+#min-max normalization
+
+#function to extract descriptive statistic params to be used in a min-max normalization function
+desc_stat<- function(x)
+{
+  map(x,~list(
+    min = min(.x),
+    max = max(.x),
+    mean = mean(.x),
+    sd = sd(.x)
+  ))
+}
+```
+
+```{r}
+# Given a dataset and normalization constants it will create a min-max normalized
+# version of the dataset.
+minmax_norm <- function(x, desc) {
+  map2_dfc(x, desc, ~(.x - .y$min)/(.y$max - .y$min))
+}
+```
+
+```{r}
+#getting descriptive stattistics parameters for train and test data
+desc_train<-trainSet %>% 
+  select(-Class) %>% 
+    desc_stat()
+```
+
+```{r}
+head(desc_train, 3)
+```
+
+```{r}
+desc_test <-testSet %>% 
+  select(-Class) %>% 
+  desc_stat()
+```
+
+```{r}
+#training inputs
+x_train<- trainSet %>% select(-Class) %>% 
+    minmax_norm(desc_train) %>% 
+    as.matrix()
+```
+
+```{r}
+dim(x_train)
+```
+
+```{r}
+x_test<- testSet %>% select(-Class) %>% 
+    minmax_norm(desc_test) %>% 
+    as.matrix()
+```
+
+```{r}
+head(x_train, 3)
+```
+
+```{r}
+#class lebels for training data
+y_train<-trainSet %>% select(Class) 
+#Class labels for test data
+y_test<-testSet %>% select(Class)  
+```
+
+```{r}
+#generating a symmetric autoencodes with 3 dense layers
+model <- keras_model_sequential()
+```
+
+```{r}
+model %>%
+  layer_dense(units = 15, activation = "tanh", input_shape = ncol(x_train)) %>%
+  layer_dense(units = 8, activation = "tanh") %>%
+  layer_dense(units = ncol(x_train))
+```
+
+```{r}
+summary(model)
+```
+#let's compile and define the loss function and optimization streategy to use-
+#we will use ADAM as the optimizer to optimze the network and update weights and params
+#and minimize the loss
+```{r}
+model %>%
+  compile(loss = "mean_squared_error", optimizer = "adam")
+```
+#let's train the model
+
+#we will only feed our model the normal(non-fradulent) cases, so that it is able to encode
+#that how and differentiate between normal and non-fradulent cases using the different distribution
+#amongst both
+```{r}
+model %>%
+  fit(x = x_train[y_train == 0,],
+      y = x_train[y_train == 0,],
+      epochs = 100,
+      batch_size = 32,
+      validation_data = list(x_test[y_test == 0,], x_test[y_test == 0,]),
+      callbacks = callback_tensorboard(log_dir = "logs/run_a")
+      )
+```
+
+```{r}
+tensorboard(log_dir = "logs/run_a")
+```
+
+```{r}
+#calculating the mean squared error
+
+pred.train<-predict(model,x_train)
+
+pred.test = predict(model,x_test)
+
+
+mse_train<- apply((x_train-pred.train)^2,1,sum)
+
+mse_test<-apply((x_test-pred.test)^2,1,sum)
+```
+
+
+
+
